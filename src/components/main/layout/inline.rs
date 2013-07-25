@@ -8,9 +8,11 @@ use layout::box::{SplitDidFit, SplitDidNotFit, TextRenderBoxClass};
 use layout::context::LayoutContext;
 use layout::display_list_builder::{DisplayListBuilder, ExtraDisplayListData};
 use layout::flow::{FlowContext, FlowData, InlineFlow};
+use layout::flow::{VisitChildView, VisitOrChildView};
 use layout::float_context::FloatContext;
 use layout::util::{ElementMapping};
 use layout::float_context::{PlacementInfo, FloatLeft};
+use layout::flow_interface::{FlowDataMethods};
 
 use std::u16;
 use std::util;
@@ -58,8 +60,8 @@ struct LineBox {
     green_zone: Size2D<Au>
 }
 
-struct LineboxScanner {
-    flow: FlowContext,
+struct LineboxScanner<V,CV> {
+    flow: FlowContext<V,CV>,
     floats: FloatContext,
     new_boxes: ~[RenderBox],
     work_list: @mut Deque<RenderBox>,
@@ -68,8 +70,8 @@ struct LineboxScanner {
     cur_y: Au,
 }
 
-impl LineboxScanner {
-    pub fn new(inline: FlowContext, float_ctx: FloatContext) -> LineboxScanner {
+impl<V,CV> LineboxScanner<V,CV> {
+    pub fn new(inline: FlowContext<V,CV>, float_ctx: FloatContext) -> LineboxScanner<V,CV> {
         assert!(inline.starts_inline_flow());
 
         LineboxScanner {
@@ -462,9 +464,9 @@ impl LineboxScanner {
     }
 }
 
-pub struct InlineFlowData {
+pub struct InlineFlowData<View,ChildView> {
     /// Data common to all flows.
-    common: FlowData,
+    common: FlowData<View,ChildView>,
 
     // A vec of all inline render boxes. Several boxes may
     // correspond to one Node/Element.
@@ -479,8 +481,8 @@ pub struct InlineFlowData {
     elems: ElementMapping
 }
 
-impl InlineFlowData {
-    pub fn new(common: FlowData) -> InlineFlowData {
+impl<V,CV> InlineFlowData<V,CV> {
+    pub fn new(common: FlowData<V,CV>) -> InlineFlowData<V,CV> {
         InlineFlowData {
             common: common,
             boxes: ~[],
@@ -502,7 +504,7 @@ pub trait InlineLayout {
     fn starts_inline_flow(&self) -> bool;
 }
 
-impl InlineLayout for FlowContext {
+impl<V,CV> InlineLayout for FlowContext<V,CV> {
     fn starts_inline_flow(&self) -> bool {
         match *self {
             InlineFlow(*) => true,
@@ -511,11 +513,11 @@ impl InlineLayout for FlowContext {
     }
 }
 
-impl InlineFlowData {
+impl<V:VisitOrChildView> InlineFlowData<V,VisitChildView> {
     pub fn bubble_widths_inline(@mut self, ctx: &mut LayoutContext) {
         let mut num_floats = 0;
 
-        for InlineFlow(self).each_child |kid| {
+        for self.flow().each_child |kid| {
             do kid.with_mut_base |base| {
                 num_floats += base.num_floats;
                 base.floats_in = FloatContext::new(base.num_floats);
@@ -571,7 +573,7 @@ impl InlineFlowData {
             } // End of for loop.
         }
 
-        for InlineFlow(self).each_child |kid| {
+        for self.flow().each_child |kid| {
             do kid.with_mut_base |base| {
                 base.position.size.width = self.common.position.size.width;
                 base.is_inorder = self.common.is_inorder;
@@ -587,7 +589,7 @@ impl InlineFlowData {
     }
 
     pub fn assign_height_inorder_inline(@mut self, ctx: &mut LayoutContext) {
-        for InlineFlow(self).each_child |kid| {
+        for self.flow().each_child |kid| {
             kid.assign_height_inorder(ctx);
         }
         self.assign_height_inline(ctx);
@@ -748,7 +750,7 @@ impl InlineFlowData {
                                                                 -self.common.position.size.height));
     }
 
-    pub fn build_display_list_inline<E:ExtraDisplayListData>(&self,
+    pub fn build_display_list_inline<E:ExtraDisplayListData>(@mut self,
                                                              builder: &DisplayListBuilder,
                                                              dirty: &Rect<Au>,
                                                              list: &Cell<DisplayList<E>>)

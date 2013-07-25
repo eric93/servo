@@ -32,9 +32,11 @@ use layout::context::LayoutContext;
 use layout::display_list_builder::{DisplayListBuilder, ExtraDisplayListData};
 use layout::inline::{InlineFlowData};
 use layout::float_context::{FloatContext, Invalid, FloatType};
+use layout::parallel_traversal::{TraversalMaster, TraversalSlave};
 
 use std::cell::Cell;
 use std::uint;
+use std::cast::transmute;
 use geom::point::Point2D;
 use geom::rect::Rect;
 use gfx::display_list::DisplayList;
@@ -42,15 +44,22 @@ use gfx::geometry::Au;
 use script::dom::node::{AbstractNode, LayoutView};
 use servo_util::tree::{TreeNode, TreeNodeRef, TreeUtils};
 
+pub struct SequentialView;
+pub struct VisitView;
+pub struct VisitChildView;
+pub trait VisitOrChildView {}
+impl VisitOrChildView for VisitView {}
+impl VisitOrChildView for VisitChildView {}
+
 /// The type of the formatting context and data specific to each context, such as line box
 /// structures or float lists.
-pub enum FlowContext {
-    AbsoluteFlow(@mut FlowData), 
-    BlockFlow(@mut BlockFlowData),
-    FloatFlow(@mut FloatFlowData),
-    InlineBlockFlow(@mut FlowData),
-    InlineFlow(@mut InlineFlowData),
-    TableFlow(@mut FlowData),
+pub enum FlowContext<View,ChildView> {
+    AbsoluteFlow(@mut FlowData<View, ChildView>), 
+    BlockFlow(@mut BlockFlowData<View, ChildView>),
+    FloatFlow(@mut FloatFlowData<View, ChildView>),
+    InlineBlockFlow(@mut FlowData<View, ChildView>),
+    InlineFlow(@mut InlineFlowData<View, ChildView>),
+    TableFlow(@mut FlowData<View, ChildView>),
 }
 
 pub enum FlowContextType {
@@ -63,13 +72,13 @@ pub enum FlowContextType {
     Flow_Table
 }
 
-impl Clone for FlowContext {
-    fn clone(&self) -> FlowContext {
+impl<V,CV> Clone for FlowContext<V, CV> {
+    fn clone(&self) -> FlowContext<V, CV> {
         *self
     }
 }
 
-impl FlowContext {
+impl<V,CV> FlowContext<V,CV> {
     pub fn teardown(&self) {
         match *self {
           AbsoluteFlow(data) |
@@ -80,37 +89,23 @@ impl FlowContext {
           InlineFlow(data) => data.teardown()
         }
     }
+}
 
-    /// Like traverse_preorder, but don't end the whole traversal if the callback
-    /// returns false.
-    fn partially_traverse_preorder(&self, callback: &fn(FlowContext) -> bool) {
-        if !callback((*self).clone()) {
-            return;
-        }
-
-        for self.each_child |kid| {
-            // FIXME: Work around rust#2202. We should be able to pass the callback directly.
-            kid.partially_traverse_preorder(|a| callback(a));
-        }
-    }
-
-    fn traverse_bu_sub_inorder (&self, callback: &fn(FlowContext) -> bool) -> bool {
-        for self.each_child |kid| {
-            // FIXME: Work around rust#2202. We should be able to pass the callback directly.
-            if !kid.traverse_bu_sub_inorder(|a| callback(a)) {
-                return false;
-            }
-        }
-
-        if !self.is_inorder() {
-            callback((*self).clone())
-        } else {
-            true
-        }
+impl TraversalSlave for FlowContext<VisitView,VisitChildView> {
+    unsafe fn decode(compressed_ptr: uint) -> FlowContext<VisitView,VisitChildView> {
+        let new_ptr: *FlowContext<VisitView,VisitChildView> = transmute(compressed_ptr);
+        *new_ptr
     }
 }
 
-impl FlowData {
+impl TraversalMaster for FlowContext<SequentialView, SequentialView> {
+    unsafe fn encode(&self) -> uint {
+        let new_ptr: *FlowContext<SequentialView,SequentialView> = self;
+        transmute(new_ptr)
+    }
+}
+
+impl<V,CV> FlowData<V,CV> {
     pub fn teardown(&mut self) {
         // Under the assumption that all flows exist in a tree,
         // we must restrict ourselves to finalizing flows that
@@ -134,8 +129,8 @@ impl FlowData {
     }
 }
 
-impl TreeNodeRef<FlowData> for FlowContext {
-    fn with_base<R>(&self, callback: &fn(&FlowData) -> R) -> R {
+impl<V,CV> TreeNodeRef<FlowData<V,CV>> for FlowContext<V,CV> {
+    fn with_base<R>(&self, callback: &fn(&FlowData<V,CV>) -> R) -> R {
         match *self {
             AbsoluteFlow(info) => callback(info),
             BlockFlow(info) => {
@@ -149,7 +144,40 @@ impl TreeNodeRef<FlowData> for FlowContext {
             TableFlow(info) => callback(info)
         }
     }
-    fn with_mut_base<R>(&self, callback: &fn(&mut FlowData) -> R) -> R {
+
+    fn with_mut_base<R>(&self, callback: &fn(&mut FlowData<V,CV>) -> R) -> R {
+        match *self {
+            AbsoluteFlow(info) => callback(info),
+            BlockFlow(info) => {
+                callback(&mut info.common)
+            }
+            FloatFlow(info) => callback(&mut info.common),
+            InlineBlockFlow(info) => callback(info),
+            InlineFlow(info) => {
+                callback(&mut info.common)
+            }
+            TableFlow(info) => callback(info),
+        }
+    }
+}
+
+impl <V,CV> FlowContext<V,CV> {
+    fn with_base<R>(&self, callback: &fn(&FlowData<V,CV>) -> R) -> R {
+        match *self {
+            AbsoluteFlow(info) => callback(info),
+            BlockFlow(info) => {
+                callback(&info.common)
+            }
+            FloatFlow(info) => callback(&info.common),
+            InlineBlockFlow(info) => callback(info),
+            InlineFlow(info) => {
+                callback(&info.common)
+            }
+            TableFlow(info) => callback(info)
+        }
+    }
+
+    fn with_mut_base<R>(&self, callback: &fn(&mut FlowData<V,CV>) -> R) -> R {
         match *self {
             AbsoluteFlow(info) => callback(info),
             BlockFlow(info) => {
@@ -169,14 +197,14 @@ impl TreeNodeRef<FlowData> for FlowContext {
 ///
 /// FIXME: We need a naming convention for pseudo-inheritance like this. How about
 /// `CommonFlowInfo`?
-pub struct FlowData {
-    node: AbstractNode<LayoutView>,
+pub struct FlowData<View,ChildView> {
+    priv node: AbstractNode<LayoutView>,
 
-    parent: Option<FlowContext>,
-    first_child: Option<FlowContext>,
-    last_child: Option<FlowContext>,
-    prev_sibling: Option<FlowContext>,
-    next_sibling: Option<FlowContext>,
+    priv parent: Option<FlowContext<View,View>>,
+    priv first_child: Option<FlowContext<ChildView,ChildView>>,
+    priv last_child: Option<FlowContext<ChildView,ChildView>>,
+    priv prev_sibling: Option<FlowContext<View,View>>,
+    priv next_sibling: Option<FlowContext<View,View>>,
 
     /* TODO (Issue #87): debug only */
     id: int,
@@ -194,50 +222,84 @@ pub struct FlowData {
     is_inorder: bool
 }
 
-impl TreeNode<FlowContext> for FlowData {
-    fn parent_node(&self) -> Option<FlowContext> {
+impl TreeNode<FlowContext<SequentialView, SequentialView>> 
+for  FlowData<SequentialView, SequentialView> {
+    fn parent_node(&self) -> Option<FlowContext<SequentialView,SequentialView>> {
         self.parent
     }
 
-    fn first_child(&self) -> Option<FlowContext> {
+    fn first_child(&self) -> Option<FlowContext<SequentialView,SequentialView>> {
         self.first_child
     }
 
-    fn last_child(&self) -> Option<FlowContext> {
+    fn last_child(&self) -> Option<FlowContext<SequentialView,SequentialView>> {
         self.last_child
     }
 
-    fn prev_sibling(&self) -> Option<FlowContext> {
+    fn prev_sibling(&self) -> Option<FlowContext<SequentialView,SequentialView>> {
         self.prev_sibling
     }
 
-    fn next_sibling(&self) -> Option<FlowContext> {
+    fn next_sibling(&self) -> Option<FlowContext<SequentialView,SequentialView>> {
         self.next_sibling
     }
 
-    fn set_parent_node(&mut self, new_parent_node: Option<FlowContext>) {
+    fn set_parent_node(&mut self, 
+                       new_parent_node: Option<FlowContext<SequentialView,SequentialView>>) {
         self.parent = new_parent_node
     }
 
-    fn set_first_child(&mut self, new_first_child: Option<FlowContext>) {
+    fn set_first_child(&mut self, 
+                       new_first_child: Option<FlowContext<SequentialView,SequentialView>>) {
         self.first_child = new_first_child
     }
 
-    fn set_last_child(&mut self, new_last_child: Option<FlowContext>) {
+    fn set_last_child(&mut self, 
+                      new_last_child: Option<FlowContext<SequentialView,SequentialView>>) {
         self.last_child = new_last_child
     }
 
-    fn set_prev_sibling(&mut self, new_prev_sibling: Option<FlowContext>) {
+    fn set_prev_sibling(&mut self, 
+                        new_prev_sibling: Option<FlowContext<SequentialView,SequentialView>>) {
         self.prev_sibling = new_prev_sibling
     }
 
-    fn set_next_sibling(&mut self, new_next_sibling: Option<FlowContext>) {
+    fn set_next_sibling(&mut self, 
+                        new_next_sibling: Option<FlowContext<SequentialView,SequentialView>>) {
         self.next_sibling = new_next_sibling
     }
 }
 
-impl FlowData {
-    pub fn new(id: int, node: AbstractNode<LayoutView>) -> FlowData {
+impl<V:VisitOrChildView> FlowContext<V,VisitChildView> {
+    fn first_child(&self) -> Option<FlowContext<VisitChildView,VisitChildView>> {
+        do self.with_base |base| {
+            base.first_child
+        }
+    }
+
+    fn last_child(&self) -> Option<FlowContext<VisitChildView,VisitChildView>> {
+        do self.with_base |base| {
+            base.last_child
+        }
+    }
+}
+
+impl FlowContext<VisitChildView,VisitChildView> {
+    fn prev_sibling(&self) -> Option<FlowContext<VisitChildView,VisitChildView>> {
+        do self.with_base |base| {
+            base.prev_sibling
+        }
+    }
+
+    fn next_sibling(&self) -> Option<FlowContext<VisitChildView,VisitChildView>> {
+        do self.with_base |base| {
+            base.next_sibling
+        }
+    }
+}
+
+impl<V,CV> FlowData<V,CV> {
+    pub fn new(id: int, node: AbstractNode<LayoutView>) -> FlowData<V,CV> {
         FlowData {
             node: node,
 
@@ -261,53 +323,7 @@ impl FlowData {
     }
 }
 
-impl<'self> FlowContext {
-    /// A convenience method to return the position of this flow. Fails if the flow is currently
-    /// being borrowed mutably.
-    #[inline(always)]
-    pub fn position(&self) -> Rect<Au> {
-        do self.with_base |common_info| {
-            common_info.position
-        }
-    }
-
-    #[inline(always)]
-    pub fn is_inorder(&self) -> bool {
-        do self.with_base |common_info| {
-            common_info.is_inorder
-        }
-    }
-
-    /// A convenience method to return the ID of this flow. Fails if the flow is currently being
-    /// borrowed mutably.
-    #[inline(always)]
-    pub fn id(&self) -> int {
-        do self.with_base |info| {
-            info.id
-        }
-    }
-
-    pub fn inline(&self) -> @mut InlineFlowData {
-        match *self {
-            InlineFlow(info) => info,
-            _ => fail!(fmt!("Tried to access inline data of non-inline: f%d", self.id()))
-        }
-    }
-
-    pub fn block(&self) -> @mut BlockFlowData {
-        match *self {
-            BlockFlow(info) => info,
-            _ => fail!(fmt!("Tried to access block data of non-block: f%d", self.id()))
-        }
-    }
-
-    pub fn root(&self) -> @mut BlockFlowData {
-        match *self {
-            BlockFlow(info) if info.is_root => info,
-            _ => fail!(fmt!("Tried to access root block data of non-root: f%d", self.id()))
-        }
-    }
-
+impl<V:VisitOrChildView> FlowContext<V,VisitChildView> {
     pub fn bubble_widths(&self, ctx: &mut LayoutContext) {
         match *self {
             BlockFlow(info)  => info.bubble_widths_block(ctx),
@@ -326,20 +342,20 @@ impl<'self> FlowContext {
         }
     }
 
-    pub fn assign_height(&self, ctx: &mut LayoutContext) {
-        match *self {
-            BlockFlow(info)  => info.assign_height_block(ctx),
-            InlineFlow(info) => info.assign_height_inline(ctx),
-            FloatFlow(info)  => info.assign_height_float(ctx),
-            _ => fail!(fmt!("Tried to assign_height of flow: f%d", self.id()))
-        }
-    }
-
     pub fn assign_height_inorder(&self, ctx: &mut LayoutContext) {
         match *self {
             BlockFlow(info)  => info.assign_height_inorder_block(ctx),
             InlineFlow(info) => info.assign_height_inorder_inline(ctx),
             FloatFlow(info)  => info.assign_height_inorder_float(ctx),
+            _ => fail!(fmt!("Tried to assign_height of flow: f%d", self.id()))
+        }
+    }
+
+    pub fn assign_height(&self, ctx: &mut LayoutContext) {
+        match *self {
+            BlockFlow(info)  => info.assign_height_block(ctx),
+            InlineFlow(info) => info.assign_height_inline(ctx),
+            FloatFlow(info)  => info.assign_height_float(ctx),
             _ => fail!(fmt!("Tried to assign_height of flow: f%d", self.id()))
         }
     }
@@ -350,7 +366,6 @@ impl<'self> FlowContext {
                                                      list: &Cell<DisplayList<E>>)
                                                      -> bool {
 
-        
         match *self {
             BlockFlow(info)  => info.build_display_list_block(builder, dirty, list),
             InlineFlow(info) => info.build_display_list_inline(builder, dirty, list),
@@ -361,6 +376,60 @@ impl<'self> FlowContext {
         }
 
     }
+}
+
+impl<V,CV> FlowContext<V,CV> {
+    /// A convenience method to return the position of this flow. Fails if the flow is currently
+    /// being borrowed mutably.
+    #[inline(always)]
+    pub fn position(&self) -> Rect<Au> {
+        do self.with_base |common_info| {
+            common_info.position
+        }
+    }
+
+    /// Convenience method to return whether this flow should be inorder or bottom-up on the assign-
+    /// heights traversal.
+    #[inline(always)]
+    pub fn is_inorder(&self) -> bool {
+        do self.with_base |common_info| {
+            common_info.is_inorder
+        }
+    }
+
+    /// A convenience method to return the ID of this flow. Fails if the flow is currently being
+    /// borrowed mutably.
+    #[inline(always)]
+    pub fn id(&self) -> int {
+        do self.with_base |info| {
+            info.id
+        }
+    }
+
+    
+
+    pub fn inline(&self) -> @mut InlineFlowData<V,CV> {
+        match *self {
+            InlineFlow(info) => info,
+            _ => fail!(fmt!("Tried to access inline data of non-inline: f%d", self.id()))
+        }
+    }
+
+    pub fn block(&self) -> @mut BlockFlowData<V,CV> {
+        match *self {
+            BlockFlow(info) => info,
+            _ => fail!(fmt!("Tried to access block data of non-block: f%d", self.id()))
+        }
+    }
+
+    pub fn root(&self) -> @mut BlockFlowData<V,CV> {
+        match *self {
+            BlockFlow(info) if info.is_root => info,
+            _ => fail!(fmt!("Tried to access root block data of non-root: f%d", self.id()))
+        }
+    }
+
+
 
     // Actual methods that do not require much flow-specific logic
     pub fn foldl_all_boxes<B:Clone>(&self, seed: B, cb: &fn(a: B, b: RenderBox) -> B) -> B {
@@ -433,7 +502,9 @@ impl<'self> FlowContext {
 
         true
     }
+}
 
+impl FlowContext<SequentialView,SequentialView> {
     /// Dumps the flow tree for debugging.
     pub fn dump(&self) {
         self.dump_indent(0);

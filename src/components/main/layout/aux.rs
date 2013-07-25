@@ -4,7 +4,7 @@
 
 //! Code for managing the layout data in the DOM.
 
-use layout::flow::FlowContext;
+use layout::flow::{FlowContext,SequentialView};
 
 use newcss::complete::CompleteSelectResults;
 use script::dom::node::{AbstractNode, LayoutView};
@@ -16,7 +16,7 @@ pub struct LayoutData {
     style: Option<CompleteSelectResults>,
 
     /// The CSS flow that this node is associated with.
-    flow: Option<FlowContext>,
+    flow: Option<FlowContext<SequentialView,SequentialView>>,
 }
 
 impl LayoutData {

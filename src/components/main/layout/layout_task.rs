@@ -12,7 +12,8 @@ use layout::box::RenderBox;
 use layout::box_builder::LayoutTreeBuilder;
 use layout::context::LayoutContext;
 use layout::display_list_builder::{DisplayListBuilder};
-use layout::flow::FlowContext;
+use layout::flow::{FlowContext,SequentialView,VisitView,VisitChildView};
+use layout::parallel_traversal::{TraversalMaster,TraversalSlave,SequentialTraverser};
 
 use std::cast::transmute;
 use std::cell::Cell;
@@ -202,10 +203,10 @@ impl LayoutTask {
         }
 
         // Construct the flow tree.
-        let layout_root: FlowContext = do profile(time::LayoutTreeBuilderCategory,
-                                                  self.profiler_chan.clone()) {
+        let layout_root: FlowContext<SequentialView,SequentialView> 
+            = do profile(time::LayoutTreeBuilderCategory, self.profiler_chan.clone()) {
             let mut builder = LayoutTreeBuilder::new();
-            let layout_root: FlowContext = match builder.construct_trees(&layout_ctx, *node) {
+            let layout_root = match builder.construct_trees(&layout_ctx, *node) {
                 Ok(root) => root,
                 Err(*) => fail!(~"Root flow should always exist")
             };
@@ -218,16 +219,19 @@ impl LayoutTask {
 
         // Perform the primary layout passes over the flow tree to compute the locations of all
         // the boxes.
+        let traverser = SequentialTraverser::new::<FlowContext<SequentialView,SequentialView>,
+                                           FlowContext<VisitView,VisitChildView>>();
+
         do profile(time::LayoutMainCategory, self.profiler_chan.clone()) {
-            for layout_root.traverse_postorder |flow| {
+            for traverser.traverse_postorder(layout_root) |flow| {
                 flow.bubble_widths(&mut layout_ctx);
             };
-            for layout_root.traverse_preorder |flow| {
+            for traverser.traverse_preorder(layout_root) |flow| {
                 flow.assign_widths(&mut layout_ctx);
             };
 
             // For now, this is an inorder traversal
-            for layout_root.traverse_bu_sub_inorder |flow| {
+            for traverser.traverse_bu_sub_inorder(layout_root) |flow| {
                 flow.assign_height(&mut layout_ctx);
             }
         }
@@ -243,8 +247,8 @@ impl LayoutTask {
 
                 // TODO: Set options on the builder before building.
                 // TODO: Be smarter about what needs painting.
-                for layout_root.traverse_preorder |flow| {
-                    flow.build_display_list(&builder, &layout_root.position(), display_list);
+                do traverser.partially_traverse_preorder(layout_root) |flow| {
+                    flow.build_display_list(&builder, &layout_root.position(), display_list)
                 }
 
                 let root_size = do layout_root.with_base |base| {

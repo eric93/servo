@@ -13,6 +13,7 @@ use layout::box::{RenderBox_Text, UnscannedTextRenderBox, UnscannedTextRenderBox
 use layout::context::LayoutContext;
 use layout::flow::{AbsoluteFlow, BlockFlow, FloatFlow, Flow_Absolute, Flow_Block, Flow_Float};
 use layout::flow::{Flow_Inline, Flow_InlineBlock, Flow_Root, Flow_Table, FlowContext};
+use layout::flow::SequentialView;
 use layout::flow::{FlowContextType, FlowData, InlineBlockFlow, InlineFlow, TableFlow};
 use layout::inline::{InlineFlowData, InlineLayout};
 use layout::text::TextRunScanner;
@@ -33,7 +34,7 @@ use servo_util::range::Range;
 use servo_util::tree::{TreeNodeRef, TreeNode, TreeUtils};
 
 pub struct LayoutTreeBuilder {
-    root_flow: Option<FlowContext>,
+    root_flow: Option<FlowContext<SequentialView,SequentialView>>,
     next_cid: int,
     next_bid: int,
 }
@@ -51,7 +52,7 @@ impl LayoutTreeBuilder {
 // helper object for building the initial box list and making the
 // mapping between DOM nodes and boxes.
 struct BoxGenerator {
-    flow: FlowContext,
+    flow: FlowContext<SequentialView,SequentialView>,
     range_stack: ~[uint],
 }
 
@@ -97,7 +98,7 @@ priv fn simulate_UA_display_rules(node: AbstractNode<LayoutView>) -> CSSDisplay 
 impl BoxGenerator {
     /* Debug ids only */
 
-    fn new(flow: FlowContext) -> BoxGenerator {
+    fn new(flow: FlowContext<SequentialView,SequentialView>) -> BoxGenerator {
         debug!("Creating box generator for flow: %s", flow.debug_str());
         BoxGenerator {
             flow: flow,
@@ -246,10 +247,10 @@ impl BoxGenerator {
                 layout_ctx: &LayoutContext,
                 ty: RenderBoxType,
                 node: AbstractNode<LayoutView>,
-                flow_context: FlowContext,
+                flow_context: FlowContext<SequentialView,SequentialView>,
                 builder: &mut LayoutTreeBuilder)
                 -> RenderBox {
-        let base = RenderBoxBase::new(node, flow_context, builder.next_box_id());
+        let base = RenderBoxBase::new(node, builder.next_box_id());
         let result = match ty {
             RenderBox_Generic => GenericRenderBoxClass(@mut base),
             RenderBox_Text => UnscannedTextRenderBoxClass(@mut UnscannedTextRenderBox::new(base)),
@@ -339,7 +340,7 @@ impl LayoutTreeBuilder {
         // boxes that correspond to child_flow.node. These boxes may
         // eventually be elided or split, but the mapping between
         // nodes and FlowContexts should not change during layout.
-        let flow: &FlowContext = &this_generator.flow;
+        let flow = &this_generator.flow;
         for flow.each_child |child_flow| {
             do child_flow.with_base |child_node| {
                 let dom_node = child_node.node;
@@ -390,7 +391,8 @@ impl LayoutTreeBuilder {
             }
         };
 
-        let sibling_flow: Option<FlowContext> = match sibling_generator {
+        let sibling_flow: Option<FlowContext<SequentialView, SequentialView>> = 
+            match sibling_generator {
             None => None,
             Some(gen) => Some(gen.flow)
         };
@@ -516,14 +518,16 @@ impl LayoutTreeBuilder {
     ///
     /// The latter can only be done immediately adjacent to, or at the beginning or end of a block
     /// flow. Otherwise, the whitespace might affect whitespace collapsing with adjacent text.
-    pub fn simplify_children_of_flow(&self, ctx: &LayoutContext, parent_flow: &mut FlowContext) {
+    pub fn simplify_children_of_flow(&self, 
+                                     ctx: &LayoutContext, 
+                                     parent_flow: &mut FlowContext<SequentialView, SequentialView>) {
         match *parent_flow {
             InlineFlow(*) => {
                 let mut found_child_inline = false;
                 let mut found_child_block = false;
 
                 let flow = *parent_flow;
-                for flow.each_child |child_ctx: FlowContext| {
+                for flow.each_child |child_ctx: FlowContext<SequentialView, SequentialView>| {
                     match child_ctx {
                         InlineFlow(*) | InlineBlockFlow(*) => found_child_inline = true,
                         BlockFlow(*) => found_child_block = true,
@@ -588,7 +592,7 @@ impl LayoutTreeBuilder {
 
                 // Issue 543: We only need to do this if there are inline child
                 // flows, but there's not a quick way to check at the moment.
-                for (*parent_flow).each_child |child_flow: FlowContext| {
+                for (*parent_flow).each_child |child_flow: FlowContext<SequentialView, SequentialView>| {
                     match child_flow {
                         InlineFlow(*) | InlineBlockFlow(*) => {
                             let mut scanner = TextRunScanner::new();
@@ -602,14 +606,14 @@ impl LayoutTreeBuilder {
         }
     }
 
-    pub fn fixup_split_inline(&self, _: FlowContext) {
+    pub fn fixup_split_inline(&self, _: FlowContext<SequentialView, SequentialView>) {
         // TODO: finish me. 
         fail!(~"TODO: handle case where an inline is split by a block")
     }
 
     /// Entry point for box creation. Should only be called on the root DOM element.
     pub fn construct_trees(&mut self, layout_ctx: &LayoutContext, root: AbstractNode<LayoutView>)
-                       -> Result<FlowContext, ()> {
+                       -> Result<FlowContext<SequentialView,SequentialView>, ()> {
         let new_flow = self.make_flow(Flow_Root, root);
         let new_generator = @mut BoxGenerator::new(new_flow);
 
@@ -619,7 +623,7 @@ impl LayoutTreeBuilder {
     }
 
     /// Creates a flow of the given type for the supplied node.
-    pub fn make_flow(&mut self, ty: FlowContextType, node: AbstractNode<LayoutView>) -> FlowContext {
+    pub fn make_flow(&mut self, ty: FlowContextType, node: AbstractNode<LayoutView>) -> FlowContext<SequentialView,SequentialView> {
         let info = FlowData::new(self.next_flow_id(), node);
         let result = match ty {
             Flow_Absolute       => AbsoluteFlow(@mut info),
