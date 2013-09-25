@@ -8,10 +8,19 @@ use geom::rect::Rect;
 use gfx::font_context::FontContext;
 use gfx::geometry::Au;
 use servo_net::local_image_cache::LocalImageCache;
+use servo_net::image_cache_task::ImageCacheTask;
 
 /// Data needed by the layout task.
 pub struct LayoutContext {
-    font_ctx: @mut FontContext,
     image_cache: @mut LocalImageCache,
-    screen_size: Rect<Au>
+    screen_size: Rect<Au>,
+}
+
+impl LayoutContext {
+    pub fn clone_for_visitor(&self, cache: ImageCacheTask) -> LayoutContext {
+        LayoutContext {
+            image_cache: @mut LocalImageCache(cache),
+            screen_size: self.screen_size.clone(),
+        }
+    }
 }

@@ -21,6 +21,7 @@ pub struct Opts {
     profiler_period: Option<float>,
     exit_after_load: bool,
     output_file: Option<~str>,
+    parallel_layout: bool,
 }
 
 pub fn from_cmdline_args(args: &[~str]) -> Opts {
@@ -35,6 +36,7 @@ pub fn from_cmdline_args(args: &[~str]) -> Opts {
         getopts::optopt("t"),  // threads to render with
         getopts::optflagopt("p"),  // profiler flag and output interval
         getopts::optflag("x"), // exit after load flag
+        getopts::optflag("l"), // parallel layout flag
     ];
 
     let opt_match = match getopts::getopts(args, opts) {
@@ -83,6 +85,7 @@ pub fn from_cmdline_args(args: &[~str]) -> Opts {
     };
 
     let exit_after_load = getopts::opt_present(&opt_match, "x");
+    let parallel_layout = getopts::opt_present(&opt_match, "l");
 
     let output_file = getopts::opt_maybe_str(&opt_match, "o");
 
@@ -94,5 +97,6 @@ pub fn from_cmdline_args(args: &[~str]) -> Opts {
         profiler_period: profiler_period,
         exit_after_load: exit_after_load,
         output_file: output_file,
+        parallel_layout: parallel_layout,
     }
 }

@@ -4,6 +4,8 @@
 
 //! Creates CSS boxes from a DOM tree.
 
+use gfx::font_context::FontContext;
+
 use layout::block::BlockFlowData;
 use layout::float::FloatFlowData;
 use layout::box::{GenericRenderBoxClass, ImageRenderBox, ImageRenderBoxClass, RenderBox};
@@ -292,6 +294,7 @@ impl LayoutTreeBuilder {
     /// and recurses on its children.
     pub fn construct_recursively<'a>(&mut self,
                              layout_ctx: &LayoutContext,
+                             font_ctx: @mut FontContext,
                              cur_node: AbstractNode<LayoutView>,
                              mut parent_generator: BoxGenerator<'a>,
                              mut prev_sibling_generator: Option<BoxGenerator<'a>>)
@@ -333,13 +336,13 @@ impl LayoutTreeBuilder {
         for child_node in cur_node.children() {
             do this_generator.with_clone |clone| {
                 let mut prev_generator = prev_gen_cell.take();
-                prev_generator = self.construct_recursively(layout_ctx, child_node, clone, prev_generator);
+                prev_generator = self.construct_recursively(layout_ctx, font_ctx, child_node, clone, prev_generator);
                 prev_gen_cell.put_back(prev_generator);
             }
         }
 
         this_generator.pop_node(layout_ctx, cur_node);
-        self.simplify_children_of_flow(layout_ctx, this_generator.flow);
+        self.simplify_children_of_flow(layout_ctx, font_ctx, this_generator.flow);
 
         match next_generator {
             Some(n_gen) => Some(n_gen),
@@ -493,7 +496,7 @@ impl LayoutTreeBuilder {
     ///
     /// The latter can only be done immediately adjacent to, or at the beginning or end of a block
     /// flow. Otherwise, the whitespace might affect whitespace collapsing with adjacent text.
-    pub fn simplify_children_of_flow(&self, ctx: &LayoutContext, parent_flow: &mut FlowContext) {
+    pub fn simplify_children_of_flow(&self, ctx: &LayoutContext, font_ctx: @mut FontContext, parent_flow: &mut FlowContext) {
         match *parent_flow {
             InlineFlow(*) => {
                 let mut found_child_inline = false;
@@ -566,7 +569,7 @@ impl LayoutTreeBuilder {
                     match *child_flow {
                         InlineFlow(*) | InlineBlockFlow(*) => {
                             let mut scanner = TextRunScanner::new();
-                            scanner.scan_for_runs(ctx, child_flow);
+                            scanner.scan_for_runs(ctx, font_ctx, child_flow);
                         }
                         _ => {}
                     }
@@ -582,7 +585,7 @@ impl LayoutTreeBuilder {
     }
 
     /// Entry point for box creation. Should only be called on the root DOM element.
-    pub fn construct_trees(&mut self, layout_ctx: &LayoutContext, root: AbstractNode<LayoutView>)
+    pub fn construct_trees(&mut self, layout_ctx: &LayoutContext, font_ctx: @mut FontContext, root: AbstractNode<LayoutView>)
                        -> Result<FlowContext, ()> {
         debug!("Constructing flow tree for DOM: ");
         root.dump();
@@ -590,7 +593,7 @@ impl LayoutTreeBuilder {
         let mut new_flow = self.make_flow(Flow_Root, root);
         {
             let new_generator = BoxGenerator::new(&mut new_flow);
-            self.construct_recursively(layout_ctx, root, new_generator, None);
+            self.construct_recursively(layout_ctx, font_ctx, root, new_generator, None);
         }
         return Ok(new_flow)
     }

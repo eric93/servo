@@ -13,6 +13,7 @@ use layout::context::LayoutContext;
 use layout::display_list_builder::{DisplayListBuilder};
 use layout::flow::FlowContext;
 use layout::incremental::{RestyleDamage, BubbleWidths};
+use layout::parallel_traversal::{ParallelTraverser,BottomUp,TopDown,Inorder,Normal};
 
 use std::cast::transmute;
 use std::cell::Cell;
@@ -66,6 +67,8 @@ struct LayoutTask {
 
     css_select_ctx: @mut SelectCtx,
     profiler_chan: ProfilerChan,
+    
+    parallel_layout: bool,
 }
 
 impl LayoutTask {
@@ -126,6 +129,7 @@ impl LayoutTask {
             layout_refs: ~[],
             css_select_ctx: @mut new_css_select_ctx(),
             profiler_chan: profiler_chan,
+            parallel_layout: opts.parallel_layout,
         }
     }
 
@@ -138,12 +142,10 @@ impl LayoutTask {
     // Create a layout context for use in building display lists, hit testing, &c.
     fn build_layout_context(&self) -> LayoutContext {
         let image_cache = self.local_image_cache;
-        let font_ctx = self.font_ctx;
         let screen_size = self.screen_size.unwrap();
 
         LayoutContext {
             image_cache: image_cache,
-            font_ctx: font_ctx,
             screen_size: Rect(Point2D(Au(0), Au(0)), screen_size),
         }
     }
@@ -227,7 +229,7 @@ impl LayoutTask {
         let mut layout_root: FlowContext = do profile(time::LayoutTreeBuilderCategory,
                                                   self.profiler_chan.clone()) {
             let mut builder = LayoutTreeBuilder::new();
-            let layout_root: FlowContext = match builder.construct_trees(&layout_ctx, *node) {
+            let layout_root: FlowContext = match builder.construct_trees(&layout_ctx, self.font_ctx, *node) {
                 Ok(root) => root,
                 Err(*) => fail!(~"Root flow should always exist")
             };
@@ -274,30 +276,78 @@ impl LayoutTask {
         debug!("layout: constructed Flow tree");
         debug!("%?", layout_root.dump());
 
-        // Perform the primary layout passes over the flow tree to compute the locations of all
-        // the boxes.
-        do profile(time::LayoutMainCategory, self.profiler_chan.clone()) {
-            do layout_root.each_postorder_prune(|f| f.restyle_damage().lacks(BubbleWidths)) |flow| {
-                flow.bubble_widths(&mut layout_ctx);
-                true
-            };
+        if self.parallel_layout {
+            let mut traverser = ~ParallelTraverser::new(3);
+            let rect = layout_ctx.screen_size;
+            let cache_task = self.image_cache_task.clone();
 
-            // FIXME: We want to do
-            //     for flow in layout_root.traverse_preorder_prune(|f| f.restyle_damage().lacks(Reflow)) 
-            // but FloatContext values can't be reused, so we need to recompute them every time.
-            debug!("assigning widths");
-            do layout_root.each_preorder |flow| {
-                flow.assign_widths(&mut layout_ctx);
+            do traverser.add_traversal(BottomUp(Normal)) |flow| {
+                debug!("Visitng flow f%?", flow.id());
+                let mut ctx = LayoutContext {
+                    image_cache: @mut LocalImageCache(cache_task.clone()),
+                    screen_size: rect.clone(),
+                };
+                flow.bubble_widths(&mut ctx);
                 true
-            };
+            }
 
-            // For now, this is an inorder traversal
-            // FIXME: prune this traversal as well
-            debug!("assigning height");
-            do layout_root.each_bu_sub_inorder |flow| {
-                flow.assign_height(&mut layout_ctx);
+            let cache_task = self.image_cache_task.clone();
+
+            do traverser.add_traversal(TopDown) |flow| {
+                debug!("Visitng flow f%?", flow.id());
+                let mut ctx = LayoutContext {
+                    image_cache: @mut LocalImageCache(cache_task.clone()),
+                    screen_size: rect.clone(),
+                };
+                flow.assign_widths(&mut ctx);
                 true
-            };
+            }
+
+            let cache_task = self.image_cache_task.clone();
+
+            do traverser.add_traversal(BottomUp(Inorder)) |flow| {
+                debug!("Visitng flow f%?", flow.id());
+                let mut ctx = LayoutContext {
+                    image_cache: @mut LocalImageCache(cache_task.clone()),
+                    screen_size: rect.clone(),
+                };
+                flow.assign_height(&mut ctx);
+                true
+            }
+
+            let mut traverser = Cell::new(traverser);
+            let layout_root_cell = Cell::new(layout_root);
+            do profile(time::LayoutMainCategory, self.profiler_chan.clone()) {
+                debug!("Running parallel traversals");
+                layout_root_cell.put_back(traverser.take().run(layout_root_cell.take(), 1));
+            }
+            layout_root = layout_root_cell.take();
+        } else {
+            // Perform the primary layout passes over the flow tree to compute the locations of all
+            // the boxes.
+            do profile(time::LayoutMainCategory, self.profiler_chan.clone()) {
+                do layout_root.each_postorder_prune(|f| f.restyle_damage().lacks(BubbleWidths)) |flow| {
+                    flow.bubble_widths(&mut layout_ctx);
+                    true
+                };
+
+                // FIXME: We want to do
+                //     for flow in layout_root.traverse_preorder_prune(|f| f.restyle_damage().lacks(Reflow))
+                // but FloatContext values can't be reused, so we need to recompute them every time.
+                debug!("assigning widths");
+                do layout_root.each_preorder |flow| {
+                    flow.assign_widths(&mut layout_ctx);
+                    true
+                };
+
+                // For now, this is an inorder traversal
+                // FIXME: prune this traversal as well
+                debug!("assigning height");
+                do layout_root.each_bu_sub_inorder |flow| {
+                    flow.assign_height(&mut layout_ctx);
+                    true
+                };
+            }
         }
 
         // Build the display list if necessary, and send it to the renderer.

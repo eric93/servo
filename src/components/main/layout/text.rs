@@ -8,6 +8,7 @@ use std::vec;
 
 use gfx::text::text_run::TextRun;
 use gfx::text::util::{CompressWhitespaceNewline, transform_text};
+use gfx::font_context::FontContext;
 use layout::box::{RenderBox, RenderBoxBase, TextRenderBox};
 use layout::box::{TextRenderBoxClass, UnscannedTextRenderBoxClass};
 use layout::context::LayoutContext;
@@ -66,7 +67,7 @@ impl TextRunScanner {
         }
     }
 
-    pub fn scan_for_runs(&mut self, ctx: &LayoutContext, flow: &mut FlowContext) {
+    pub fn scan_for_runs(&mut self, ctx: &LayoutContext, font_ctx: @mut FontContext, flow: &mut FlowContext) {
         {
             let inline = flow.imm_inline();
             // FIXME: this assertion fails on wikipedia, but doesn't seem
@@ -80,13 +81,13 @@ impl TextRunScanner {
         for box_i in range(0, flow.imm_inline().boxes.len()) {
             debug!("TextRunScanner: considering box: %?", flow.imm_inline().boxes[box_i].debug_str());
             if box_i > 0 && !can_coalesce_text_nodes(flow.imm_inline().boxes, box_i-1, box_i) {
-                last_whitespace = self.flush_clump_to_list(ctx, flow, last_whitespace, &mut out_boxes);
+                last_whitespace = self.flush_clump_to_list(ctx, font_ctx, flow, last_whitespace, &mut out_boxes);
             }
             self.clump.extend_by(1);
         }
         // handle remaining clumps
         if self.clump.length() > 0 {
-            self.flush_clump_to_list(ctx, flow, last_whitespace, &mut out_boxes);
+            self.flush_clump_to_list(ctx, font_ctx, flow, last_whitespace, &mut out_boxes);
         }
 
         debug!("TextRunScanner: swapping out boxes.");
@@ -122,6 +123,7 @@ impl TextRunScanner {
     /// necessary.
     pub fn flush_clump_to_list(&mut self,
                                ctx: &LayoutContext,
+                               font_ctx: @mut FontContext,
                                flow: &mut FlowContext,
                                last_whitespace: bool,
                                out_boxes: &mut ~[RenderBox]) -> bool {
@@ -170,7 +172,7 @@ impl TextRunScanner {
                     // TODO(#177): Text run creation must account for the renderability of text by
                     // font group fonts. This is probably achieved by creating the font group above
                     // and then letting `FontGroup` decide which `Font` to stick into the text run.
-                    let fontgroup = ctx.font_ctx.get_resolved_font_for_style(&font_style);
+                    let fontgroup = font_ctx.get_resolved_font_for_style(&font_style);
                     let run = @fontgroup.create_textrun(transformed_text, underline);
 
                     debug!("TextRunScanner: pushing single text box in range: %? (%?)", self.clump, text);
@@ -219,7 +221,7 @@ impl TextRunScanner {
                 // font group fonts. This is probably achieved by creating the font group above
                 // and then letting `FontGroup` decide which `Font` to stick into the text run.
                 let font_style = in_boxes[self.clump.begin()].font_style();
-                let fontgroup = ctx.font_ctx.get_resolved_font_for_style(&font_style);
+                let fontgroup = font_ctx.get_resolved_font_for_style(&font_style);
                 let underline = has_underline(in_boxes[self.clump.begin()].text_decoration());
 
                 // TextRuns contain a cycle which is usually resolved by the teardown

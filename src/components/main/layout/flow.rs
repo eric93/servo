@@ -33,12 +33,15 @@ use layout::display_list_builder::{DisplayListBuilder, ExtraDisplayListData};
 use layout::inline::{InlineFlowData};
 use layout::float_context::{FloatContext, Invalid, FloatType};
 use layout::incremental::RestyleDamage;
+use layout::parallel_traversal::ParentInfo;
 use css::node_style::StyledNode;
 use extra::dlist::{DList,MutDListIterator};
 use extra::container::Deque;
 
 use std::cell::Cell;
 use std::io::stderr;
+use std::iterator::Map;
+use std::unstable::atomics::AtomicUint;
 use geom::point::Point2D;
 use geom::rect::Rect;
 use gfx::display_list::DisplayList;
@@ -139,24 +142,33 @@ impl<'self> FlowContext {
     pub fn add_new_child(&mut self, new_child: FlowContext) {
         let cell = Cell::new(new_child);
         do self.with_mut_base |base| {
-            base.children.push_back(cell.take());
+            base.children.push_back(Some(cell.take()));
         }
     }
 
     pub fn with_first_child<R>(&mut self, cb: &fn(Option<&mut FlowContext>) -> R) -> R {
         do self.with_mut_base |base| {
-            cb(base.children.front_mut())
+            cb(match base.children.front_mut() {
+                None => None,
+                Some(ref mut val) => Some(val.get_mut_ref()),
+            })
         }
     }
 
     pub fn with_last_child<R>(&mut self, cb: &fn(Option<&mut FlowContext>) -> R) -> R {
         do self.with_mut_base |base| {
-            cb(base.children.back_mut())
+            cb(match base.children.back_mut() {
+                None => None,
+                Some(ref mut val) => Some(val.get_mut_ref()),
+            })
         }
     }
 
     pub fn last_child(&'self mut self) -> Option<&'self mut FlowContext> {
-        self.mut_base().children.back_mut()
+        match self.mut_base().children.back_mut() {
+            None => None,
+            Some(ref mut val) => Some(val.get_mut_ref())
+        }
     }
 
     pub fn remove_first(&mut self) {
@@ -171,10 +183,10 @@ impl<'self> FlowContext {
         }
     }
 
-    pub fn child_iter<'a>(&'a mut self) -> MutDListIterator<'a, FlowContext> {
-        self.mut_base().children.mut_iter()
+    pub fn child_iter(&'self mut self) -> 
+        Map<'self, &'self mut Option<FlowContext>, &'self mut FlowContext, MutDListIterator<'self, Option<FlowContext>>> {
+        self.mut_base().children.mut_iter().map(|x| x.get_mut_ref())
     }
-
 }
 
 impl<'self> FlowContext {
@@ -220,6 +232,20 @@ impl<'self> FlowContext {
             TableFlow(ref mut info) => &mut(**info),
         }
     }
+    pub fn base(&'self self) -> &'self FlowData {
+        match *self {
+            AbsoluteFlow(ref info) => &**info,
+            BlockFlow(ref info) => {
+                &info.common
+            }
+            FloatFlow(ref info) => &info.common,
+            InlineBlockFlow(ref info) => &**info,
+            InlineFlow(ref info) => {
+                &info.common
+            }
+            TableFlow(ref info) => &**info,
+        }
+    }
 }
 
 /// Data common to all flows.
@@ -230,10 +256,14 @@ pub struct FlowData {
     node: AbstractNode<LayoutView>,
     restyle_damage: RestyleDamage,
 
-    children: DList<FlowContext>,
+    children: DList<Option<FlowContext>>,
 
     /* TODO (Issue #87): debug only */
     id: int,
+
+    parent_info: Option<ParentInfo>,
+    child_counter: AtomicUint,
+    traversal_num: uint,
 
     /* layout computations */
     // TODO: min/pref and position are used during disjoint phases of
@@ -263,7 +293,7 @@ impl Iterator<RenderBox> for BoxIterator {
         }
     }
 }
-impl FlowData {
+impl<'self> FlowData {
     pub fn new(id: int, node: AbstractNode<LayoutView>) -> FlowData {
         FlowData {
             node: node,
@@ -272,6 +302,10 @@ impl FlowData {
             children: DList::new(),
 
             id: id,
+
+            parent_info: None,
+            child_counter: AtomicUint::new(0),
+            traversal_num: 0,
 
             min_width: Au(0),
             pref_width: Au(0),
@@ -284,8 +318,9 @@ impl FlowData {
         }
     }
 
-    pub fn child_iter<'a>(&'a mut self) -> MutDListIterator<'a, FlowContext> {
-        self.children.mut_iter()
+    pub fn child_iter(&'self mut self) -> 
+        Map<'self, &'self mut Option<FlowContext>, &'self mut FlowContext, MutDListIterator<'self,Option<FlowContext>>> {
+        self.children.mut_iter().map(|x| x.get_mut_ref())
     }
 
 }
